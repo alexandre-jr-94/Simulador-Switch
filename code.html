@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<!-- Define o idioma como Português Brasileiro -->
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulador Avançado de Switch Cisco (PT-BR v3)</title>
+    <style>
+        /* --- Estilos CSS (sem alterações funcionais) --- */
+        body { font-family: 'Consolas', 'Courier New', monospace; background-color: #1e1e1e; color: #d4d4d4; margin: 0; padding: 10px; display: flex; height: 100vh; box-sizing: border-box; }
+        #main-content { flex-grow: 1; display: flex; flex-direction: column; height: 100%; margin-right: 10px; }
+        #terminal-container { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #555; margin-bottom: 10px; }
+        #terminal-output { flex-grow: 1; overflow-y: scroll; padding: 10px; background-color: #000; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em; line-height: 1.3; }
+        #input-line { display: flex; background-color: #000; padding: 5px 10px; border-top: 1px solid #555; }
+        #prompt { white-space: nowrap; margin-right: 5px; }
+        .prompt-user { color: #60a5fa; } .prompt-priv { color: #f87171; } .prompt-global { color: #4ade80; } .prompt-if { color: #c084fc; } .prompt-vlan { color: #facc15; }
+        #command-input { flex-grow: 1; background-color: transparent; border: none; color: #d4d4d4; font-family: inherit; font-size: inherit; outline: none; }
+        #sidebar { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; }
+        #available-commands-container { flex-grow: 1; background-color: #252526; border: 1px solid #555; padding: 10px; overflow-y: auto; font-size: 0.85em; margin-bottom: 10px; }
+        #available-commands-container h4 { margin-top: 0; color: #9cdcfe; border-bottom: 1px solid #555; padding-bottom: 5px; }
+        #available-commands-list { list-style: none; padding: 0; margin: 0; } #available-commands-list li { margin-bottom: 5px; }
+        #available-commands-list .cmd { color: #c586c0; font-weight: bold; } #available-commands-list .param { color: #4ec9b0; } #available-commands-list .cr { color: #d4d4d4; font-style: italic; } #available-commands-list .desc { color: #888; margin-left: 5px; }
+        .output-error { color: #f48771; } .output-info { color: #9cdcfe; } .output-success { color: #4ade80; } .output-user-input { color: #ce9178; } .output-boot { color: #a0a0a0; }
+        #file-buttons button, #reset-button button { display: block; width: 100%; padding: 8px; margin-bottom: 5px; background-color: #3a3a3d; color: #d4d4d4; border: 1px solid #555; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 0.9em; }
+        #file-buttons button:hover, #reset-button button:hover { background-color: #4a4a4d; } #file-buttons button:active, #reset-button button:active { background-color: #5a5a5d; }
+        #reset-button button { background-color: #8b0000; border-color: #5c0000; } #reset-button button:hover { background-color: #a50000; } #reset-button button:active { background-color: #c50000; }
+        #load-config-input { display: none; } #command-input:disabled { background-color: #333; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <!-- Estrutura HTML Principal (sem alterações) -->
+    <div id="main-content"> <div id="terminal-container"> <div id="terminal-output">Initializing Simulator...</div> <div id="input-line"> <span id="prompt"></span> <input type="text" id="command-input" autofocus autocomplete="off" disabled> </div> </div> </div>
+    <div id="sidebar"> <div id="available-commands-container"> <h4>Próximos Comandos Válidos</h4> <ul id="available-commands-list"></ul> </div> <div id="file-buttons"> <button id="save-config-button">Salvar Config (Arquivo)</button> <button id="load-config-button">Carregar Config (Arquivo)</button> <input type="file" id="load-config-input" accept=".json"> </div> <div id="reset-button"> <button id="reset-switch-button">Resetar Switch (Limpa Config)</button> </div> </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+
+            // --- Seleção de Elementos DOM ---
+            const terminalOutput = document.getElementById('terminal-output');
+            const commandInput = document.getElementById('command-input');
+            const promptElement = document.getElementById('prompt');
+            const availableCommandsList = document.getElementById('available-commands-list');
+            const saveConfigButton = document.getElementById('save-config-button');
+            const loadConfigButton = document.getElementById('load-config-button');
+            const loadConfigInput = document.getElementById('load-config-input');
+            const resetSwitchButton = document.getElementById('reset-switch-button');
+
+            // --- Constantes e Configuração Base ---
+            const LOCAL_STORAGE_KEY = 'ciscoSimConfigAdvancedV2_PTBR';
+            const BOOT_DELAY = 110; // Delay ligeiramente ajustado
+            const hardwareConfig = { model: "Simulado-2960-X", ports: [ { type: 'FastEthernet', count: 24 }, { type: 'GigabitEthernet', count: 2 } ] };
+            let hardwareInterfaceNames = [];
+            function generateHardwareInterfaceNames() { hardwareInterfaceNames = []; hardwareConfig.ports.forEach(pG => { for (let i = 1; i <= pG.count; i++) hardwareInterfaceNames.push(`${pG.type}0/${i}`); }); if (!hardwareInterfaceNames.includes('Vlan1')) hardwareInterfaceNames.push('Vlan1'); }
+            const getDefaultInterfaceConfig = () => ({ ip_address: null, mask: null, shutdown: true, switchport: { mode: 'access', accessVlan: '1', trunkAllowedVlans: parseVlanList('1-4094'), nativeVlan: '1' } });
+            const getDefaultConfig = () => ({ hostname: 'Switch', enable_password: null, enable_secret: null, interfaces: {}, vlans: { '1': { name: 'default' } }, staticRoutes: [] });
+
+            // --- Variáveis de Estado ---
+            let config = getDefaultConfig();
+            let current_mode = 'user_exec';
+            let current_interface = null; let current_vlan_id = null;
+            let command_history = []; let history_index = -1;
+            let boot_start_time = Date.now();
+
+            // --- Funções Auxiliares (Validação, Formatação, etc.) ---
+            // (Funções parseInterfaceName, isValidIp, isValidMask, isValidVlanId, parseVlanList,
+            // formatVlanList, formatTable, formatUptime, checkEnablePassword - idênticas)
+            function parseInterfaceName(name){const m=/^(gi|fa|e|vlan)[a-zA-Z]*(\d+(\/\d+(\/\d+)*)?)$/i.exec(name);if(m){const pM={'gi':'GigabitEthernet','fa':'FastEthernet','e':'Ethernet','vlan':'Vlan'},p=pM[m[1].toLowerCase()]||'Unk',fN=`${p}${m[2]}`;if(hardwareInterfaceNames.includes(fN)||p==='Vlan')return fN}return null}
+            function isValidIp(ip){return ip&&/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)&&ip.split('.').every(p=>+p>=0&&+p<=255)}
+            function isValidMask(mask){if(!isValidIp(mask))return!1;try{const p=mask.split('.').map(Number),i=(p[0]<<24)|(p[1]<<16)|(p[2]<<8)|p[3];return(((~i&0xFFFFFFFF)+1)&(~i&0xFFFFFFFF))===0}catch(e){return!1}}
+            function isValidVlanId(id){return/^\d+$/.test(id)&&+id>=1&&+id<=4094}
+            function parseVlanList(listStr){const v=new Set;if(!listStr)return[];const p=listStr.split(',');for(const t of p){if(t.includes('-')){const[s,e]=t.split('-').map(Number);if(!isNaN(s)&&!isNaN(e)&&s<=e&&isValidVlanId(s)&&isValidVlanId(e))for(let i=s;i<=e;i++)v.add(i);else throw new Error(`Intervalo inválido: ${t}`)}else{const l=Number(t);if(!isNaN(l)&&isValidVlanId(l))v.add(l);else throw new Error(`ID VLAN inválido: ${t}`)}}return Array.from(v).sort((a,b)=>a-b)}
+            function formatVlanList(vlanArray){if(!vlanArray||vlanArray.length===0)return'none';vlanArray.sort((a,b)=>a-b);const r=[];let s=vlanArray[0],e=s;for(let i=1;i<vlanArray.length;i++){if(vlanArray[i]===e+1)e=vlanArray[i];else{r.push(s===e?`${s}`:`${s}-${e}`);s=vlanArray[i];e=s;}}r.push(s===e?`${s}`:`${s}-${e}`);return r.join(',')}
+            function formatTable(headers,rows){if(rows.length===0)return" (Nenhuma entrada encontrada)";const w=headers.map(h=>h.length);rows.forEach(r=>{r.forEach((c,i)=>{w[i]=Math.max(w[i],String(c).length)})});let o=headers.map((h,i)=>h.padEnd(w[i])).join('  ')+'\n'+headers.map((h,i)=>'-'.repeat(w[i])).join('  ')+'\n';rows.forEach(r=>{o+=r.map((c,i)=>String(c).padEnd(w[i])).join('  ')+'\n'});return o}
+            function formatUptime(startTime){const n=Date.now();let d=Math.floor((n-startTime)/1e3),y=Math.floor(d/86400);d-=y*86400;const h=Math.floor(d/3600)%24;d-=h*3600;const m=Math.floor(d/60)%60;d-=m*60;const s=d%60;let u='';if(y>0)u+=`${y} dia${y>1?'s':''}, `;if(h>0||y>0)u+=`${h} hora${h>1?'s':''}, `;if(m>0||h>0||y>0)u+=`${m} minuto${m>1?'s':''}, `;u+=`${s} segundo${s>1?'s':''}`;return u}
+            function checkEnablePassword(enteredPassword){if(config.enable_secret)return enteredPassword===config.enable_secret;else if(config.enable_password)return enteredPassword===config.enable_password;return!0}
+
+            // --- Salvar/Carregar Configuração ---
+            function saveConfigToLocalStorage(){try{localStorage.setItem(LOCAL_STORAGE_KEY,JSON.stringify(config))}catch(e){console.error("LS Save Error:",e)}}
+            function loadConfigFromLocalStorage(){let l=!1;try{const s=localStorage.getItem(LOCAL_STORAGE_KEY);if(s){const p=JSON.parse(s);config=mergeWithDefaults(getDefaultConfig(),p);l=!0}else config=getDefaultConfig();boot_start_time=Date.now()}catch(e){console.error("LS Load Error:",e);printToTerminal("Erro ao carregar config. Usando padrão.","output-error");localStorage.removeItem(LOCAL_STORAGE_KEY);config=getDefaultConfig();boot_start_time=Date.now()}return l}
+            function saveConfigToFile(){try{const j=JSON.stringify(config,null,2),b=new Blob([j],{type:'application/json'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=`${config.hostname}-config.json`;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(u);printToTerminal("Config salva.","output-success")}catch(e){console.error("File Save Error:",e);printToTerminal("% Erro ao salvar.","output-error")}}
+            function loadConfigFromFile(file){if(!file)return;const r=new FileReader;r.onload=e=>{try{const l=JSON.parse(e.target.result);if(!l||typeof l.hostname!=='string'||typeof l.interfaces!=='object')throw new Error("Formato inválido.");config=mergeWithDefaults(getDefaultConfig(),l);boot_start_time=Date.now();current_mode='user_exec';current_interface=null;current_vlan_id=null;printToTerminal(`Config carregada: ${file.name}`,"output-success");saveConfigToLocalStorage();updatePrompt();updateAvailableCommandsPanel('');commandInput.value='';commandInput.focus()}catch(e){console.error("File Load Error:",e);printToTerminal(`% Erro ao carregar: ${e.message}`,"output-error")}finally{loadConfigInput.value=null}};r.onerror=()=>{printToTerminal(`% Erro ao ler: ${file.name}`,"output-error");loadConfigInput.value=null};r.readAsText(file)}
+            function mergeWithDefaults(defaults,loaded){const m=JSON.parse(JSON.stringify(defaults));for(const k in loaded){if(loaded.hasOwnProperty(k)){if(k==='interfaces'&&typeof loaded.interfaces==='object'){m.interfaces=m.interfaces||{};for(const i in loaded.interfaces){if(hardwareInterfaceNames.includes(i)||i.startsWith('Vlan'))m.interfaces[i]=mergeWithDefaults(getDefaultInterfaceConfig(),loaded.interfaces[i])}}else if(typeof loaded[k]==='object'&&loaded[k]!==null&&!Array.isArray(loaded[k])&&defaults[k]&&typeof defaults[k]==='object')m[k]=mergeWithDefaults(defaults[k],loaded[k]);else m[k]=loaded[k]}}if(!m.vlans)m.vlans=defaults.vlans;if(!m.staticRoutes)m.staticRoutes=defaults.staticRoutes;if(!m.vlans['1'])m.vlans['1']={name:'default'};return m}
+
+            // --- Saída no Terminal e Prompt ---
+            function printToTerminal(text,className=''){const l=document.createElement('div');if(className)l.classList.add(className);const n=String(text).split('\n');n.forEach((c,i)=>{const t=document.createTextNode(c);l.appendChild(t);if(i<n.length-1)l.appendChild(document.createElement('br'))});terminalOutput.appendChild(l);terminalOutput.scrollTop=terminalOutput.scrollHeight}
+            function updatePrompt(){let promptText=config.hostname,promptClass='';switch(current_mode){case 'user_exec':promptText+='>';promptClass='prompt-user';break;case 'privileged_exec':promptText+='#';promptClass='prompt-priv';break;case 'global_config':promptText+='(config)#';promptClass='prompt-global';break;case 'interface_config':promptText+=`(config-if)#`;promptClass='prompt-if';break;case 'vlan_config':promptText+=`(config-vlan)#`;promptClass='prompt-vlan';break;default:promptText+='(unknown)#'}promptElement.textContent=promptText+' ';promptElement.className=promptClass}
+
+            // --- Sequência de Boot ---
+            // Exibe uma animação de boot no terminal.
+            function runBootSequence(isReload = false) {
+                 // ******** MENSAGENS DE BOOT RESTAURADAS ********
+                 const bootMessages = [
+                     "System Bootstrap, Version 15.0(2)SE4, RELEASE SOFTWARE (fc1)",
+                     `Copyright (c) 1986-2013 by Cisco Systems, Inc.`,
+                     `Compiled ${new Date(Date.now() - 86400000 * 30).toDateString()}`, // Data simulada
+                     "",
+                     `${hardwareConfig.model} simulator initializing...`,
+                     "POST: System Board OK",
+                     "POST: CPU OK",
+                     "POST: Memory OK",
+                     "POST: Interface Controllers OK",
+                     "",
+                     "--- Performing Power-On Self Test (POST) ---",
+                     "...",
+                     "POST: All tests passed.",
+                     "",
+                     `Loading simulated flash:/${hardwareConfig.model.toLowerCase()}-universalk9-mz.150-2.SE4.bin...`, // Imagem simulada
+                     "###########################################################",
+                     "[OK]",
+                     "",
+                     // Mensagem varia se é boot inicial ou reload
+                     isReload ? "Reading startup configuration from simulated NVRAM..." : "Initializing flash filesystem...",
+                     "Done initializing.",
+                     "",
+                     "-- System Configuration Dialog --",
+                     "Would you like to enter the initial configuration dialog? [yes/no]: no", // Auto-resposta 'no'
+                     "",
+                     "Loading configuration...",
+                     // Mensagem varia se carrega da 'NVRAM' ou usa padrão
+                     isReload ? "Restoring configuration from storage..." : "Using default configuration...",
+                     "[OK]",
+                     "",
+                     "Press RETURN to get started!"
+                 ];
+                 // ******** FIM DAS MENSAGENS RESTAURADAS ********
+
+                 terminalOutput.innerHTML = ''; commandInput.disabled=true; promptElement.textContent = ''; let delay = 0;
+                 bootMessages.forEach(msg => { setTimeout(() => { printToTerminal(msg, 'output-boot'); }, delay); delay += BOOT_DELAY; });
+                 setTimeout(() => {
+                     if(isReload){ loadConfigFromLocalStorage(); } else { boot_start_time = Date.now(); config = getDefaultConfig(); }
+                     current_mode = 'user_exec'; current_interface=null; current_vlan_id=null; history_index=-1;
+                     updatePrompt(); updateAvailableCommandsPanel(''); commandInput.disabled=false; commandInput.focus();
+                 }, delay + 500);
+            }
+
+
+            // --- Ações dos Comandos (Funções action* idênticas) ---
+            function actionEnable(args){if(config.enable_secret||config.enable_password){const p=prompt("Senha:");if(p===null)return;if(!checkEnablePassword(p)){printToTerminal("% Senhas incorretas","output-error");return}}current_mode='privileged_exec'}
+            function actionDisable(args){current_mode='user_exec'}
+            function actionExit(args){if(current_mode==='vlan_config'){current_mode='global_config';current_vlan_id=null}else if(current_mode==='interface_config'){current_mode='global_config';current_interface=null}else if(current_mode==='global_config')current_mode='privileged_exec';else if(current_mode==='privileged_exec')current_mode='user_exec'}
+            function actionConfigureTerminal(args){current_mode='global_config'}
+            function actionShowVersion(args){printToTerminal(`Cisco IOS Software [Simulator], ${hardwareConfig.model} Software...`);/*...*/printToTerminal(`${config.hostname} uptime is ${formatUptime(boot_start_time)}`);/*...*/}
+            function actionShowRunningConfig(args){printToTerminal("Building configuration...");/*...*/printToTerminal("end")}
+            function actionShowIpInterfaceBrief(args){const h=["Intf","IP-Addr","OK?","Method","Status","Proto"],r=[];hardwareInterfaceNames.forEach(ifN=>{const ifC=config.interfaces[ifN]||getDefaultInterfaceConfig(),ip=ifC.ip_address||"unassigned",ok=ip==="unassigned"?"NO":"YES",meth=ip==="unassigned"?"unset":"manual",stat=ifC.shutdown?"admin down":"up",prot=stat==="up"?"up":"down";r.push([ifN.replace('ernet','').replace('Ethernet','Eth'),ip,ok,meth,stat,prot])});printToTerminal(formatTable(h,r))}
+            function actionShowInterfacesStatus(args){const h=["Port","Name","Status","Vlan","Duplex","Speed","Type"],r=[];hardwareInterfaceNames.forEach(ifN=>{const ifC=config.interfaces[ifN]||getDefaultInterfaceConfig(),nm="",stat=ifC.shutdown?"disabled":"connected";let vl=' - ';if(ifC.switchport)vl=ifC.switchport.mode==='trunk'?'trunk':ifC.switchport.accessVlan;const d='auto',s='auto',tM=ifN.match(/^(Gi|Fa|Et|Vl)/),typ=tM?tM[1]+'th':ifN.startsWith('Vl')?'VLAN':'Unk';r.push([ifN,nm,stat,vl,d,s,typ])});printToTerminal(formatTable(h,r))}
+            function actionSetHostname(args){if(args.length!==1||!/^[a-zA-Z0-9_-]+$/.test(args[0])){printToTerminal("% Nome inválido.","output-error");return}config.hostname=args[0];saveConfigToLocalStorage();updatePrompt()}
+            function actionSelectInterface(args){const iNR=args.join(''),iN=parseInterfaceName(iNR);if(!iN){printToTerminal(`% Interface inválida/inexistente: ${iNR}`,"output-error");return}if(!config.interfaces[iN])config.interfaces[iN]=getDefaultInterfaceConfig();current_interface=iN;current_mode='interface_config'}
+            function actionIpAddress(args){if(args.length!==2){printToTerminal("% Uso: ip address <ip> <mask>","output-error");return}const[ip,mask]=args;if(!isValidIp(ip)||!isValidMask(mask)){printToTerminal("% IP ou Máscara inválida.","output-error");return}if(!current_interface)return;if(config.interfaces[current_interface]?.switchport&&!current_interface.startsWith('Vlan')){printToTerminal(`% Não pode config. IP em intf L2 (${current_interface}).`,"output-error");return}config.interfaces[current_interface].ip_address=ip;config.interfaces[current_interface].mask=mask;saveConfigToLocalStorage()}
+            function actionShutdown(args,no_cmd=!1){if(!current_interface)return;const nS=!no_cmd;config.interfaces[current_interface].shutdown=nS;const s=nS?"admin down":"up";printToTerminal(`% Intf ${current_interface}, estado para ${s}`,"output-info");saveConfigToLocalStorage()}
+            function actionEnablePassword(args){if(args.length!==1||args[0].length===0){printToTerminal("% Senha inválida.","output-error");return}config.enable_password=args[0];if(config.enable_secret)printToTerminal("% Aviso: secret definido.","output-info");saveConfigToLocalStorage()}
+            function actionEnableSecret(args){if(args.length!==1||args[0].length===0){printToTerminal("% Segredo inválido.","output-error");return}config.enable_secret=args[0];config.enable_password=null;printToTerminal("% Segredo enable definido.","output-info");saveConfigToLocalStorage()}
+            function actionNoEnablePassword(args){config.enable_password=null;saveConfigToLocalStorage()}
+            function actionNoEnableSecret(args){config.enable_secret=null;saveConfigToLocalStorage()}
+            function actionSelectVlan(args){if(args.length!==1||!isValidVlanId(args[0])){printToTerminal("% ID VLAN inválido.","output-error");return}const vId=args[0];if(!config.vlans[vId]){config.vlans[vId]={name:`VLAN${vId.padStart(4,'0')}`};saveConfigToLocalStorage();}current_vlan_id=vId;current_mode='vlan_config'}
+            function actionVlanName(args){if(args.length!==1||args[0].length===0||args[0].length>32){printToTerminal("% Nome VLAN inválido.","output-error");return}if(!current_vlan_id)return;config.vlans[current_vlan_id].name=args[0];saveConfigToLocalStorage()}
+            function actionSwitchportMode(args){if(args.length!==1||!['access','trunk'].includes(args[0])){printToTerminal("% Modo inválido.","output-error");return}if(!current_interface)return;if(!config.interfaces[current_interface].switchport)config.interfaces[current_interface].switchport=getDefaultInterfaceConfig().switchport;config.interfaces[current_interface].switchport.mode=args[0];printToTerminal(`% Modo intf ${current_interface} -> ${args[0]}.`,"output-info");saveConfigToLocalStorage()}
+            function actionSwitchportAccessVlan(args){if(args.length!==1||!isValidVlanId(args[0])){printToTerminal("% ID VLAN inválido.","output-error");return}if(!current_interface)return;if(config.interfaces[current_interface].switchport?.mode!=='access'){printToTerminal(`% Intf ${current_interface} não é acesso.`,"output-error");return}if(!config.vlans[args[0]]){printToTerminal(`% VLAN ${args[0]} não existe. Criando...`,"output-info");config.vlans[args[0]]={name:`VLAN${args[0].padStart(4,'0')}`};saveConfigToLocalStorage();}config.interfaces[current_interface].switchport.accessVlan=args[0];saveConfigToLocalStorage()}
+            function actionSwitchportTrunkAllowedVlan(args){const lS=args.join('');if(!current_interface)return;if(config.interfaces[current_interface].switchport?.mode!=='trunk'){printToTerminal(`% Intf ${current_interface} não é tronco.`,"output-error");return}try{const vIds=parseVlanList(lS);config.interfaces[current_interface].switchport.trunkAllowedVlans=vIds;saveConfigToLocalStorage()}catch(e){printToTerminal(`% Lista VLAN inválida: ${e.message}`,"output-error")}}
+            function actionIpRoute(args){if(args.length!==3){printToTerminal("% Uso: ip route <rede> <mask> <hop>","output-error");return}const[n,m,h]=args;if(!isValidIp(n)||!isValidMask(m)||!isValidIp(h)){printToTerminal("% Rede/Máscara/Hop inválido.","output-error");return}const exists=config.staticRoutes.some(r=>r.network===n&&r.mask===m);if(exists){printToTerminal("% Rota já existe. Substituindo...","output-info");config.staticRoutes=config.staticRoutes.filter(r=>!(r.network===n&&r.mask===m))}config.staticRoutes.push({network:n,mask:m,nextHop:h});saveConfigToLocalStorage()}
+            function actionNoIpRoute(args){if(args.length<2||args.length>3){printToTerminal("% Uso: no ip route <rede> <mask> [hop]","output-error");return}const[n,m,h]=args;if(!isValidIp(n)||!isValidMask(m)){printToTerminal("% Rede/Máscara inválida.","output-error");return}const iL=config.staticRoutes.length;config.staticRoutes=config.staticRoutes.filter(r=>{const nM=r.network===n&&r.mask===m,hM=h?r.nextHop===h:!0;return!(nM&&hM)});if(config.staticRoutes.length<iL){saveConfigToLocalStorage();printToTerminal("% Rota(s) removida(s).","output-info")}else printToTerminal("% Rota não encontrada.","output-info")}
+            function actionCopyRunStart(args){saveConfigToLocalStorage();printToTerminal("Building configuration...\n[OK]")}
+            function actionReload(args){const c=confirm("Prosseguir com reload?");if(c){printToTerminal("Prosseguir com reload? [confirm]\n");runBootSequence(!0)}else printToTerminal("% Reload abortado.","output-info")}
+
+            // --- Estrutura de Comandos ---
+            const enableExecCommand={_action:actionEnable,_help:'Entrar modo privilegiado',_mode:['user_exec']}; const enableConfigCommand={_mode:['global_config'],_help:'Modificar senhas enable','password':{_action:actionEnablePassword,_help:'Definir enable password',_param_type:'WORD',_param_help:'<SENHA>'},'secret':{_action:actionEnableSecret,_help:'Definir enable secret',_param_type:'WORD',_param_help:'<SEGREDO>'}}; const noEnableConfigCommand={_mode:['global_config'],_help:'Remover senhas enable','password':{_action:actionNoEnablePassword,_help:'Remover enable password'},'secret':{_action:actionNoEnableSecret,_help:'Remover enable secret'}};
+            const commands={'enable':enableExecCommand,'disable':{_action:actionDisable,_help:'Sair modo privilegiado',_mode:['privileged_exec']},'exit':{_action:actionExit,_help:'Sair do modo atual'},'reload':{_action:actionReload,_help:'Reiniciar switch',_mode:['privileged_exec']},'copy':{_help:'Copiar',_mode:['privileged_exec'],'running-config':{'startup-config':{_action:actionCopyRunStart,_help:'Copiar para inicialização'}}},'write':{_help:'Gravar config',_mode:['privileged_exec'],'memory':{_action:actionCopyRunStart,_help:'Gravar na NVRAM'}},'configure':{_help:'Entrar modo config',_mode:['privileged_exec'],'terminal':{_action:actionConfigureTerminal,_help:'Configurar pelo terminal'}},'show':{_help:'Exibir info',_mode:['privileged_exec','global_config','interface_config','vlan_config'],'version':{_action:actionShowVersion,_help:'Status HW/SW'},'running-config':{_action:actionShowRunningConfig,_help:'Config em execução'},'ip':{'interface':{'brief':{_action:actionShowIpInterfaceBrief,_help:'Resumo IP interfaces'}}},'interfaces':{'status':{_action:actionShowInterfacesStatus,_help:'Status interfaces'}}},'hostname':{_action:actionSetHostname,_help:'Definir nome',_mode:['global_config'],_param_type:'WORD',_param_help:'<NOME>'},'interface':{_action:actionSelectInterface,_help:'Selecionar interface',_mode:['global_config'],_param_type:'INTERFACE',_param_help:'<Interface>'},'ip':{_mode:['global_config','interface_config'],_help:'Config IP','address':{_action:actionIpAddress,_help:'Definir IP',_mode:['interface_config'],_param_type:'IP_MASK',_param_help:'<IP> <MASK>'},'route':{_action:actionIpRoute,_help:'Rota estática',_mode:['global_config'],_param_type:'IP_ROUTE',_param_help:'<REDE> <MASK> <HOP>'}},'shutdown':{_action:actionShutdown,_help:'Desativar interface',_mode:['interface_config']},'vlan':{_action:actionSelectVlan,_help:'Modo config VLAN',_mode:['global_config'],_param_type:'VLANID',_param_help:'<1-4094>'},'name':{_action:actionVlanName,_help:'Nome VLAN',_mode:['vlan_config'],_param_type:'WORD',_param_help:'<NOME>'},'switchport':{_mode:['interface_config'],_help:'Params Switchport','mode':{_action:actionSwitchportMode,_help:'Modo (access/trunk)',_param_type:'WORD',_param_help:'[access|trunk]'},'access':{'vlan':{_action:actionSwitchportAccessVlan,_help:'VLAN acesso',_param_type:'VLANID',_param_help:'<1-4094>'}},'trunk':{'allowed':{'vlan':{_action:actionSwitchportTrunkAllowedVlan,_help:'VLANs permitidas',_param_type:'VLANLIST',_param_help:'<lista>'}}}},'no':{_help:'Negar comando',_mode:['global_config','interface_config','vlan_config'],'shutdown':{_action:a=>actionShutdown(a,!0),_help:'Ativar interface',_mode:['interface_config']},'ip':{'route':{_action:actionNoIpRoute,_help:'Remover rota',_mode:['global_config'],_param_type:'IP_ROUTE',_param_help:'<REDE> <MASK> [HOP]'}}}};
+
+            // --- Funções Principais: Parser, Ajuda, Completar, Executar ---
+            // (Funções findCommandContext, getPossibleCompletions, displayHelp, handleTabCompletion, updateAvailableCommandsPanel, processCommand - idênticas à versão funcional anterior)
+            function findCommandContext(words,commandTree=commands,mode=current_mode){let level=commandTree,path=[],currentWords=[...words];while(currentWords.length>0){const word=currentWords.shift();let nextNode=null;if(word==='enable'&&path.length===0)nextNode=mode==='user_exec'?enableExecCommand:mode==='global_config'?enableConfigCommand:null;else if(word==='no'&&path.length===0&&currentWords[0]==='enable'&&mode==='global_config'){path.push(word);word=currentWords.shift();nextNode=noEnableConfigCommand}else nextNode=level&&typeof level==='object'?level[word]:null;if(nextNode){path.push(word);level=nextNode}else if(level&&level._param_type){const type=level._param_type;if(type==='IP_MASK'&&currentWords.length>0)currentWords.shift();else if(type==='IP_ROUTE'&&currentWords.length>1){currentWords.shift();currentWords.shift()}else if(type==='VLANID'&&currentWords.length>0)currentWords.shift();else if(type==='VLANLIST'&&currentWords.length>0)currentWords.shift();else if(type==='WORD'&&currentWords.length>0)currentWords.shift();else if(type==='INTERFACE'&&currentWords.length>0)currentWords.shift();return{level:level,path:path,consumed_param:!0}}else return{level:null,path:path,error:'Caminho inválido'}}return{level:level,path:path}}
+            function getPossibleCompletions(contextLevel,currentMode){const completions=[];if(!contextLevel||typeof contextLevel!=='object')return completions;if(contextLevel._param_type)completions.push({type:'param',name:contextLevel._param_help||`<${contextLevel._param_type}>`,help:contextLevel._help||''});else{let commandSource=contextLevel;if(contextLevel===commands){if(currentMode==='user_exec'&&enableExecCommand)completions.push({type:'command',name:'enable',help:enableExecCommand._help});if(currentMode==='global_config'&&enableConfigCommand)completions.push({type:'command',name:'enable',help:enableConfigCommand._help})}else if(contextLevel===commands.no&&currentMode==='global_config'&&noEnableConfigCommand)completions.push({type:'command',name:'enable',help:noEnableConfigCommand._help});for(const cmd in commandSource){if(!cmd.startsWith('_')){if(cmd==='enable'&&(contextLevel===commands||contextLevel===commands.no))continue;const details=commandSource[cmd],allowedModes=details._mode;if(allowedModes===undefined||allowedModes===null||allowedModes.includes(currentMode))completions.push({type:'command',name:cmd,help:details._help||''})}}if(contextLevel._action&&!contextLevel._param_type){const allowedModes=contextLevel._mode;if(allowedModes===undefined||allowedModes===null||allowedModes.includes(currentMode))completions.push({type:'cr',name:'<cr>',help:'Executar'})}}return completions}
+            function displayHelp(inputText){const words=inputText.trim().split(/\s+/).filter(w=>w),context=findCommandContext(words);if(context.error){printToTerminal(`% Erro ajuda: ${context.error}`,"output-error");return}const possible=getPossibleCompletions(context.level,current_mode);if(possible.length>0){printToTerminal("Possíveis complementos:");possible.forEach(comp=>{let t=comp.type==='param'?'(Parâm)':comp.type==='cr'?'':'';const n=`  ${comp.name}`.padEnd(25,' ');printToTerminal(`${n}${t} ${comp.help}`)})}else{const fCtx=findCommandContext(words);if(fCtx.level&&fCtx.level._action&&!fCtx.level._param_type){const m=fCtx.level._mode;if(m===undefined||m===null||m.includes(current_mode)){printToTerminal("Possíveis complementos:\n"+"  <cr>".padEnd(27,' ')+"Executar");return}}printToTerminal("? Nenhuma ajuda disponível ou comando inválido.","output-info")}}
+            function handleTabCompletion(inputText){const words=inputText.split(/\s+/),cW=words[words.length-1],ctxW=cW===''?words.slice(0,-1):words.slice(0,-1),ctx=findCommandContext(ctxW);if(!ctx.level||ctx.error||ctx.consumed_param)return inputText;const poss=getPossibleCompletions(ctx.level,current_mode).filter(c=>c.type==='command'),matches=poss.filter(p=>p.name.startsWith(cW));if(matches.length===1){words[words.length-1]=matches[0].name+' ';return words.join(' ')}else if(matches.length>1){printToTerminal(promptElement.textContent+inputText,"output-user-input");printToTerminal("Comandos possíveis:");matches.forEach(m=>printToTerminal(`  ${m.name}`));updatePrompt();return inputText}return inputText}
+            function updateAvailableCommandsPanel(inputText){const words=inputText.split(/\s+/).filter(w=>w);let ctxShow=findCommandContext(words),fP='',poss=[];if(inputText.length>0&&!inputText.endsWith(' ')&&words.length>0){fP=words[words.length-1];ctxShow=findCommandContext(words.slice(0,-1))}if(ctxShow.level&&!ctxShow.error)poss=getPossibleCompletions(ctxShow.level,current_mode);if(fP)poss=poss.filter(p=>p.name.startsWith(fP));availableCommandsList.innerHTML='';if(poss.length>0)poss.forEach(c=>{const li=document.createElement('li'),nS=document.createElement('span');nS.classList.add(c.type==='param'?'param':c.type==='cr'?'cr':'cmd');nS.textContent=c.name;const dS=document.createElement('span');dS.classList.add('desc');dS.textContent=c.help;li.appendChild(nS);li.appendChild(dS);availableCommandsList.appendChild(li)});else{const li=document.createElement('li');li.textContent='Nenhuma opção.';li.style.color='#888';availableCommandsList.appendChild(li)}}
+            function processCommand(inputText){const trimmedInput=inputText.trim();printToTerminal(promptElement.textContent+trimmedInput,"output-user-input");if(trimmedInput){command_history=command_history.filter(c=>c!==trimmedInput);command_history.unshift(trimmedInput);if(command_history.length>50)command_history.pop();history_index=-1}if(!trimmedInput){updatePrompt();return}if(trimmedInput.endsWith('?')){displayHelp(trimmedInput.slice(0,-1));updatePrompt();return}const words=trimmedInput.split(/\s+/).filter(w=>w);let level=commands,path=[],args=[...words],action=null,finalArgs=[],execError=null,cmdNode=null,currentPathNode=commands;for(let i=0;i<words.length;i++){const word=words[i];if(!currentPathNode||typeof currentPathNode!=='object'){execError=`% Erro parser perto de '${word}'`;break}let nextNode=null;if(word==='enable'&&path.length===0)nextNode=current_mode==='user_exec'?enableExecCommand:current_mode==='global_config'?enableConfigCommand:null;else if(word==='no'&&path.length===0&&words[i+1]==='enable'&&current_mode==='global_config'){path.push(word);i++;word=words[i];nextNode=noEnableConfigCommand}else nextNode=currentPathNode[word];if(nextNode){path.push(word);currentPathNode=nextNode;if(currentPathNode._action){cmdNode=currentPathNode;action=currentPathNode._action;finalArgs=words.slice(i+1);if(currentPathNode._param_type)break;else if(finalArgs.length>0){execError=`% Argumentos extras: '${finalArgs[0]}'`;action=null;break}}else{action=null;cmdNode=null}}else if(cmdNode&&cmdNode._param_type){action=cmdNode._action;finalArgs=words.slice(i);break}else{const markerPos=inputText.indexOf(word);execError=`% Entrada inválida em '^'.\n  ${inputText}\n  ${' '.repeat(promptElement.textContent.length+markerPos)}^`;action=null;break}}if(execError)printToTerminal(execError,"output-error");else if(action&&cmdNode){const allowedModes=cmdNode._mode;if(allowedModes&&!allowedModes.includes(current_mode))printToTerminal(`% Comando indisponível (${current_mode})`,"output-error");else if(cmdNode._param_type&&finalArgs.length===0)printToTerminal(`% Incompleto: ${cmdNode._param_help}`,"output-error");else if(cmdNode._param_type==='IP_MASK'&&finalArgs.length!==2)printToTerminal(`% Incompleto: ${cmdNode._param_help}`,"output-error");else if(cmdNode._param_type==='IP_ROUTE'&&finalArgs.length!==3)printToTerminal(`% Incompleto: ${cmdNode._param_help}`,"output-error");else if(cmdNode._param_type==='WORD'&&finalArgs.length!==1)printToTerminal(`% Incompleto: ${cmdNode._param_help}`,"output-error");else if(cmdNode._param_type==='VLANID'&&finalArgs.length!==1)printToTerminal(`% Incompleto: ${cmdNode._param_help}`,"output-error");else if(cmdNode._param_type==='INTERFACE'&&finalArgs.length===0)printToTerminal(`% Incompleto: ${cmdNode._param_help}`,"output-error");else if(!cmdNode._param_type&&finalArgs.length>0)printToTerminal(`% Argumentos extras: '${finalArgs[0]}'`,"output-error");else{try{if(current_mode==='interface_config'&&!current_interface&&allowedModes?.includes('interface_config'))throw new Error("Nenhuma interface selecionada");if(current_mode==='vlan_config'&&!current_vlan_id&&allowedModes?.includes('vlan_config'))throw new Error("Nenhuma VLAN selecionada");action(finalArgs)}catch(e){printToTerminal(`% Erro: ${e.message}`,"output-error");console.error("Exec Erro:",e)}}}else if(!action&&currentPathNode&&typeof currentPathNode==='object'&&Object.keys(currentPathNode).filter(k=>!k.startsWith('_')).length>0)printToTerminal("% Comando incompleto.","output-error");else if(!action&&!execError)printToTerminal("% Comando não reconhecido.","output-error");commandInput.value='';updatePrompt();updateAvailableCommandsPanel('')}
+
+
+            // --- Listeners de Eventos ---
+            commandInput.addEventListener('keydown',e=>{const c=commandInput.value;if(e.key==='Enter'){e.preventDefault();processCommand(c)}else if(e.key==='Tab'){e.preventDefault();const t=handleTabCompletion(c);commandInput.value=t;updateAvailableCommandsPanel(commandInput.value)}else if(e.key==='ArrowUp'){e.preventDefault();if(command_history.length>0){history_index++;if(history_index>=command_history.length)history_index=command_history.length-1;commandInput.value=command_history[history_index];commandInput.selectionStart=commandInput.selectionEnd=commandInput.value.length;updateAvailableCommandsPanel(commandInput.value)}}else if(e.key==='ArrowDown'){e.preventDefault();if(history_index>=0){history_index--;commandInput.value=history_index<0?'':command_history[history_index];commandInput.selectionStart=commandInput.selectionEnd=commandInput.value.length;updateAvailableCommandsPanel(commandInput.value)}}});
+            commandInput.addEventListener('input',()=>{updateAvailableCommandsPanel(commandInput.value)});
+            saveConfigButton.addEventListener('click',saveConfigToFile);
+            loadConfigButton.addEventListener('click',()=>{loadConfigInput.click()});
+            loadConfigInput.addEventListener('change',e=>{if(e.target.files.length>0)loadConfigFromFile(e.target.files[0])});
+            resetSwitchButton.addEventListener('click',()=>{if(confirm("Resetar switch? Apaga config.")){printToTerminal("Resetando...","output-info");localStorage.removeItem(LOCAL_STORAGE_KEY);config=getDefaultConfig();runBootSequence(!1)}});
+
+            // --- Inicialização ---
+            generateHardwareInterfaceNames();
+            const savedConfigExists = localStorage.getItem(LOCAL_STORAGE_KEY) !== null;
+            if (!savedConfigExists) {
+                runBootSequence(false); // Boot na primeira vez
+            } else {
+                const loaded = loadConfigFromLocalStorage(); // Carrega se existe
+                if(loaded){ printToTerminal("Config anterior carregada. Pressione ENTER para começar!", "output-info"); }
+                else { printToTerminal("Nenhuma config salva. Pressione ENTER para começar!", "output-info"); }
+                 current_mode = 'user_exec'; updatePrompt(); updateAvailableCommandsPanel('');
+                 commandInput.disabled = false; commandInput.focus(); // Habilita e foca
+            }
+
+        }); // Fim DOMContentLoaded
+    </script>
+
+</body>
+</html>
